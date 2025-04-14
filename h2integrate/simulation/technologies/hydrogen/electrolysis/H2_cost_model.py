@@ -48,7 +48,6 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         self.add_output('cf_h2_annuals', units='')
         self.add_output('electrolyzer_total_capital_cost', units='')
         self.add_output('electrolyzer_OM_cost', units='')
-        self.add_output('electrolyzer_capex_kw', units='kw')
         self.add_output('h2_tax_credit', units='USD', size=10)
         self.add_output('h2_itc', size=30)
     
@@ -65,277 +64,277 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         return (self.options['include_refurb_in_opex'], self.options['offshore'], self.options['program_record'])
 
     def compute_primal(self, electrolyzer_capex_kw, time_between_replacement, electrolyzer_size_mw, useful_life, atb_year,
-        electrical_generation_timeseries_kw, hydrogen_annual_output, PTC_USD_kg, ITC_perc, include_refurb_in_opex, offshore)
+        electrical_generation_timeseries_kw, hydrogen_annual_output, PTC_USD_kg, ITC_perc):
 
-    # Basic information in our analysis
-    kw_continuous = electrolyzer_size_mw * 1000
+        # Basic information in our analysis
+        kw_continuous = electrolyzer_size_mw * 1000
 
-    # Capacity factor
-    avg_generation = np.mean(electrical_generation_timeseries_kw)  # Avg Generation
-    # print("avg_generation: ", avg_generation)
-    
-    # We handle if statements slightly differently in jax
-    # cap_factor = avg_generation / kw_continuous
-    # if cap_factor > 1.0:
-    #     cap_factor = 1.0
-    #     warnings.warn(
-    #         "Electrolyzer capacity factor would be greater than 1 with provided energy profile."
-    #         " Capacity factor has been reduced to 1 for electrolyzer cost estimate purposes."
-    #     )
-    #                       condition      , if true,             if false      )
-    cap_factor = jnp.where(cap_factor > 1.0, 1.0, avg_generation / kw_continuous)
-    
-
-    # print(cap_factor)
-    # if cap_factor != approx(1.0):
-    #     raise(ValueError("Capacity factor must equal 1"))
-    # print("cap_factor",cap_factor)
-
-    # TODO: time_between_replacement cannot be both and input and an output. 
-    # you must establish what it is before it is input into this component.
-    # 
-    # #Apply PEM Cost Estimates based on year based on GPRA pathway (H2New)
-    # if atb_year == 2022:
-    #     electrolyzer_capex_kw = 1100     #[$/kW capacity] stack capital cost
-    #     time_between_replacement = 40000    #[hrs]
-    # elif atb_year == 2025:
-    #     electrolyzer_capex_kw = 300
-    #     time_between_replacement = 80000    #[hrs]
-    # elif atb_year == 2030:
-    #     electrolyzer_capex_kw = 150
-    #     time_between_replacement = 80000    #[hrs]
-    # elif atb_year == 2035:
-    #     electrolyzer_capex_kw = 100
-    #     time_between_replacement = 80000    #[hrs]
-
-    # Hydrogen Production Cost From PEM Electrolysis - 2019 (HFTO Program Record)
-    # https://www.hydrogen.energy.gov/pdfs/19009_h2_production_cost_pem_electrolysis_2019.pdf
-
-    # Capital costs provide by Hydrogen Production Cost From PEM Electrolysis - 2019 (HFTO
-    # Program Record)
-    stack_capital_cost = 342  # [$/kW]
-    mechanical_bop_cost = 36  # [$/kW] for a compressor
-    electrical_bop_cost = 82  # [$/kW] for a rectifier
-
-    # Installed capital cost
-    stack_installation_factor = 12 / 100  # [%] for stack cost
-    elec_installation_factor = 12 / 100  # [%] and electrical BOP
-
-    # scale installation fraction if offshore (see Singlitico 2021 https://doi.org/10.1016/j.rset.2021.100005)
-    stack_installation_factor *= 1 + offshore
-    elec_installation_factor *= 1 + offshore
-
-    # mechanical BOP install cost = 0%
-
-    # Indirect capital cost as a percentage of installed capital cost
-    site_prep = 2 / 100  # [%]
-    engineering_design = 10 / 100  # [%]
-    project_contingency = 15 / 100  # [%]
-    permitting = 15 / 100  # [%]
-    land = 250000  # [$]
-
-    stack_replacment_cost = 15 / 100  # [% of installed capital cost]
-    fixed_OM = 0.24  # [$/kg H2]
-
-    # Chose to use numbers provided by GPRA pathways
-    # if program_record:
-    #     total_direct_electrolyzer_cost_kw = (
-    #         (stack_capital_cost * (1 + stack_installation_factor))
-    #         + mechanical_bop_cost
-    #         + (electrical_bop_cost * (1 + elec_installation_factor))
-    #     )
-    # else:
-    #     total_direct_electrolyzer_cost_kw = (
-    #         (electrolyzer_capex_kw * (1 + stack_installation_factor))
-    #         + mechanical_bop_cost
-    #         + (electrical_bop_cost * (1 + elec_installation_factor))
-    #     )
-    temp1 = (
-            (stack_capital_cost * (1 + stack_installation_factor))
-            + mechanical_bop_cost
-            + (electrical_bop_cost * (1 + elec_installation_factor))
-        )
-    temp2  = (
-            (electrolyzer_capex_kw * (1 + stack_installation_factor))
-            + mechanical_bop_cost
-            + (electrical_bop_cost * (1 + elec_installation_factor))
-        )
-    total_direct_electrolyzer_cost_kw = jnp.where(self.options['program_record'], temp1, temp2)
-
-
-    # Assign CapEx for electrolyzer from capacity based installed CapEx
-    electrolyzer_total_installed_capex = (
-        total_direct_electrolyzer_cost_kw * electrolyzer_size_mw * 1000
-    )
-
-    # Add indirect capital costs
-    electrolyzer_total_capital_cost = (
-        (
-            (site_prep + engineering_design + project_contingency + permitting)
-            * electrolyzer_total_installed_capex
-        )
-        + land
-        + electrolyzer_total_installed_capex
-    )
-
-    # O&M costs
-    # https://www.sciencedirect.com/science/article/pii/S2542435121003068
-    # for 700 MW electrolyzer (https://www.hydrogen.energy.gov/pdfs/19009_h2_production_cost_pem_electrolysis_2019.pdf)
-    h2_FOM_kg = 0.24  # [$/kg]
-
-    # linearly scaled current central fixed O&M for a 700MW electrolyzer up to a 1000MW electrolyzer
-    scaled_h2_FOM_kg = h2_FOM_kg * electrolyzer_size_mw / 700
-
-    h2_FOM_kWh = scaled_h2_FOM_kg / 55.5  # [$/kWh] used 55.5 kWh/kg for efficiency
-    fixed_OM = h2_FOM_kWh * 8760  # [$/kW-y]
-    property_tax_insurance = 1.5 / 100  # [% of Cap/y]
-    variable_OM = 1.30  # [$/MWh]
-
-    # Amortized refurbishment expense [$/MWh]
-    # if not include_refurb_in_opex:
-    #     amortized_refurbish_cost = 0.0
-    # else:
-    #     amortized_refurbish_cost = (
-    #         (total_direct_electrolyzer_cost_kw * stack_replacment_cost)
-    #         * max(((useful_life * 8760 * cap_factor) / time_between_replacement - 1), 0)
-    #         / useful_life
-    #         / 8760
-    #         / cap_factor
-    #         * 1000
-    #     )
-    amortized_refurbish_cost = (
-            (total_direct_electrolyzer_cost_kw * stack_replacment_cost)
-            * max(((useful_life * 8760 * cap_factor) / time_between_replacement - 1), 0)
-            / useful_life
-            / 8760
-            / cap_factor
-            * 1000
-        )
-    amortized_refurbish_cost = jnp.where(include_refurb_in_opex, amortized_refurbish_cost, 0.0)
-    
-
-    # Total O&M costs [% of installed cap/year]
-    total_OM_costs = (
-        fixed_OM + (property_tax_insurance * total_direct_electrolyzer_cost_kw)
-    ) / total_direct_electrolyzer_cost_kw + (
-        (variable_OM + amortized_refurbish_cost)
-        / 1000
-        * 8760
-        * (cap_factor / total_direct_electrolyzer_cost_kw)
-    )
-
-    # capacity_based_OM = True
-    # if capacity_based_OM:
-    #     electrolyzer_OM_cost = electrolyzer_total_installed_capex * total_OM_costs  # Capacity based
-    # else:
-    #     electrolyzer_OM_cost = (
-    #         fixed_OM * hydrogen_annual_output
-    #     )  # Production based - likely not very accurate
-    electrolyzer_OM_cost = jnp.where(self.options['capacity_based_OM'], electrolyzer_total_installed_capex * total_OM_costs, fixed_OM * hydrogen_annual_output)
-
-    # Add in electrolyzer repair schedule (every 7 years)
-    # Use if not using time between replacement given in hours
-    # Currently not added into further calculations
-
-    # TODO: The original calculations do not have the correct units because useful_life 
-    # is meansured in years and time_between_replacement is measured in hours.
-    # We are going to skip building the repair schedule since it should probably not be part
-    # of the cost calculations. You could probably solve this with a lax.fori_loop(). 
-    
-    # electrolyzer_repair_schedule = jnp.array[]
-    # counter = 1
-    # for year in range(0, useful_life):
-    #     if year == 0:
-    #         electrolyzer_repair_schedule = np.append(electrolyzer_repair_schedule, [0])
-
-    #     elif counter % time_between_replacement == 0:
-    #         electrolyzer_repair_schedule = np.append(electrolyzer_repair_schedule, [1])
-
-    #     else:
-    #         electrolyzer_repair_schedule = np.append(electrolyzer_repair_schedule, [0])
-    #     counter += 1
-    # electrolyzer_repair_schedule * (stack_replacment_cost * electrolyzer_total_installed_capex)
-    # print("H2 replacement costs: ", electrolyzer_replacement_costs)
-
-    # TMP Thinking area:
-    # def body(i, arr):
-    #     return arr.at[i].set(i)
-
-    # # an array of integer years
-    # result = lax.fori_loop(0, useful_life, body, jnp.zeros(useful_life))
-    # # Output: [0. 1. 2. 3. 4.]
-
-    # # How many hours has the electrolizer run
-    # electro_hours = result * 8760
-
-    # # run hours divided by replacement hours
-    # electro_hours_per_replacement = electro_hours / electrolyzer_repair_schedule
-
-    # # number of replacements
-    # omj.smooth_round(electro_hours_per_replacement)
-    # # [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, ...]
-
-    # electrolyzer_repair_schedule = jnp.zeros(useful_life) # Pre-allocate an array of zeros
-
-    # #                                          init value 
-    # tmp_useful_life = useful_life
-    # result = lax.fori_loop(0, useful_life, body, jnp.zeros(useful_life))
-
-    # from jax import lax
-
-    # def body(i, electrolyzer_repair_schedule):
-    #     electrolyzer_repair_schedule = jnp.where(tmp_useful_life >= time_between_replacement / 8766, 1, 0)
-    #     tmp_useful_life = jnp.where(tmp_useful_life >= time_between_replacement / 8766, tmp_useful_life - time_between_replacement / 8766, tmp_useful_life)
+        # Capacity factor
+        avg_generation = jnp.mean(electrical_generation_timeseries_kw)  # Avg Generation
+        # print("avg_generation: ", avg_generation)
         
-    #     return electrolyzer_repair_schedule.at[i].set(i)
+        # We handle if statements slightly differently in jax
+        cap_factor = avg_generation / kw_continuous
+        # if cap_factor > 1.0:
+        #     cap_factor = 1.0
+        #     warnings.warn(
+        #         "Electrolyzer capacity factor would be greater than 1 with provided energy profile."
+        #         " Capacity factor has been reduced to 1 for electrolyzer cost estimate purposes."
+        #     )
+        #                       condition      , if true,             if false      )
+        cap_factor = jnp.where(cap_factor > 1.0, 1.0, cap_factor)
+        
+
+        # print(cap_factor)
+        # if cap_factor != approx(1.0):
+        #     raise(ValueError("Capacity factor must equal 1"))
+        # print("cap_factor",cap_factor)
+
+        # TODO: time_between_replacement and electrolyzer_capex_kw cannot be both and input and an output. 
+        # you must establish what it is before it is input into this component.
+        # 
+        # #Apply PEM Cost Estimates based on year based on GPRA pathway (H2New)
+        # if atb_year == 2022:
+        #     electrolyzer_capex_kw = 1100     #[$/kW capacity] stack capital cost
+        #     time_between_replacement = 40000    #[hrs]
+        # elif atb_year == 2025:
+        #     electrolyzer_capex_kw = 300
+        #     time_between_replacement = 80000    #[hrs]
+        # elif atb_year == 2030:
+        #     electrolyzer_capex_kw = 150
+        #     time_between_replacement = 80000    #[hrs]
+        # elif atb_year == 2035:
+        #     electrolyzer_capex_kw = 100
+        #     time_between_replacement = 80000    #[hrs]
+
+        # Hydrogen Production Cost From PEM Electrolysis - 2019 (HFTO Program Record)
+        # https://www.hydrogen.energy.gov/pdfs/19009_h2_production_cost_pem_electrolysis_2019.pdf
+
+        # Capital costs provide by Hydrogen Production Cost From PEM Electrolysis - 2019 (HFTO
+        # Program Record)
+        stack_capital_cost = 342  # [$/kW]
+        mechanical_bop_cost = 36  # [$/kW] for a compressor
+        electrical_bop_cost = 82  # [$/kW] for a rectifier
+
+        # Installed capital cost
+        stack_installation_factor = 12 / 100  # [%] for stack cost
+        elec_installation_factor = 12 / 100  # [%] and electrical BOP
+
+        # scale installation fraction if offshore (see Singlitico 2021 https://doi.org/10.1016/j.rset.2021.100005)
+        stack_installation_factor *= 1 + offshore
+        elec_installation_factor *= 1 + offshore
+
+        # mechanical BOP install cost = 0%
+
+        # Indirect capital cost as a percentage of installed capital cost
+        site_prep = 2 / 100  # [%]
+        engineering_design = 10 / 100  # [%]
+        project_contingency = 15 / 100  # [%]
+        permitting = 15 / 100  # [%]
+        land = 250000  # [$]
+
+        stack_replacment_cost = 15 / 100  # [% of installed capital cost]
+        fixed_OM = 0.24  # [$/kg H2]
+
+        # Chose to use numbers provided by GPRA pathways
+        # if program_record:
+        #     total_direct_electrolyzer_cost_kw = (
+        #         (stack_capital_cost * (1 + stack_installation_factor))
+        #         + mechanical_bop_cost
+        #         + (electrical_bop_cost * (1 + elec_installation_factor))
+        #     )
+        # else:
+        #     total_direct_electrolyzer_cost_kw = (
+        #         (electrolyzer_capex_kw * (1 + stack_installation_factor))
+        #         + mechanical_bop_cost
+        #         + (electrical_bop_cost * (1 + elec_installation_factor))
+        #     )
+        temp1 = (
+                (stack_capital_cost * (1 + stack_installation_factor))
+                + mechanical_bop_cost
+                + (electrical_bop_cost * (1 + elec_installation_factor))
+            )
+        temp2  = (
+                (electrolyzer_capex_kw * (1 + stack_installation_factor))
+                + mechanical_bop_cost
+                + (electrical_bop_cost * (1 + elec_installation_factor))
+            )
+        total_direct_electrolyzer_cost_kw = jnp.where(self.options['program_record'], temp1, temp2)
+
+
+        # Assign CapEx for electrolyzer from capacity based installed CapEx
+        electrolyzer_total_installed_capex = (
+            total_direct_electrolyzer_cost_kw * electrolyzer_size_mw * 1000
+        )
+
+        # Add indirect capital costs
+        electrolyzer_total_capital_cost = (
+            (
+                (site_prep + engineering_design + project_contingency + permitting)
+                * electrolyzer_total_installed_capex
+            )
+            + land
+            + electrolyzer_total_installed_capex
+        )
+
+        # O&M costs
+        # https://www.sciencedirect.com/science/article/pii/S2542435121003068
+        # for 700 MW electrolyzer (https://www.hydrogen.energy.gov/pdfs/19009_h2_production_cost_pem_electrolysis_2019.pdf)
+        h2_FOM_kg = 0.24  # [$/kg]
+
+        # linearly scaled current central fixed O&M for a 700MW electrolyzer up to a 1000MW electrolyzer
+        scaled_h2_FOM_kg = h2_FOM_kg * electrolyzer_size_mw / 700
+
+        h2_FOM_kWh = scaled_h2_FOM_kg / 55.5  # [$/kWh] used 55.5 kWh/kg for efficiency
+        fixed_OM = h2_FOM_kWh * 8760  # [$/kW-y]
+        property_tax_insurance = 1.5 / 100  # [% of Cap/y]
+        variable_OM = 1.30  # [$/MWh]
+
+        # Amortized refurbishment expense [$/MWh]
+        # if not include_refurb_in_opex:
+        #     amortized_refurbish_cost = 0.0
+        # else:
+        #     amortized_refurbish_cost = (
+        #         (total_direct_electrolyzer_cost_kw * stack_replacment_cost)
+        #         * max(((useful_life * 8760 * cap_factor) / time_between_replacement - 1), 0)
+        #         / useful_life
+        #         / 8760
+        #         / cap_factor
+        #         * 1000
+        #     )
+        amortized_refurbish_cost = (
+                (total_direct_electrolyzer_cost_kw * stack_replacment_cost)
+                * max(((useful_life * 8760 * cap_factor) / time_between_replacement - 1), 0)
+                / useful_life
+                / 8760
+                / cap_factor
+                * 1000
+            )
+        amortized_refurbish_cost = jnp.where(self.options['include_refurb_in_opex'], amortized_refurbish_cost, 0.0)
+        
+
+        # Total O&M costs [% of installed cap/year]
+        total_OM_costs = (
+            fixed_OM + (property_tax_insurance * total_direct_electrolyzer_cost_kw)
+        ) / total_direct_electrolyzer_cost_kw + (
+            (variable_OM + amortized_refurbish_cost)
+            / 1000
+            * 8760
+            * (cap_factor / total_direct_electrolyzer_cost_kw)
+        )
+
+        # capacity_based_OM = True
+        # if capacity_based_OM:
+        #     electrolyzer_OM_cost = electrolyzer_total_installed_capex * total_OM_costs  # Capacity based
+        # else:
+        #     electrolyzer_OM_cost = (
+        #         fixed_OM * hydrogen_annual_output
+        #     )  # Production based - likely not very accurate
+        electrolyzer_OM_cost = jnp.where(self.options['capacity_based_OM'], electrolyzer_total_installed_capex * total_OM_costs, fixed_OM * hydrogen_annual_output)
+
+        # Add in electrolyzer repair schedule (every 7 years)
+        # Use if not using time between replacement given in hours
+        # Currently not added into further calculations
+
+        # TODO: The original calculations do not have the correct units because useful_life 
+        # is meansured in years and time_between_replacement is measured in hours.
+        # We are going to skip building the repair schedule since it should probably not be part
+        # of the cost calculations. You could probably solve this with a lax.fori_loop(). 
+        
+        # electrolyzer_repair_schedule = jnp.array[]
+        # counter = 1
+        # for year in range(0, useful_life):
+        #     if year == 0:
+        #         electrolyzer_repair_schedule = np.append(electrolyzer_repair_schedule, [0])
+
+        #     elif counter % time_between_replacement == 0:
+        #         electrolyzer_repair_schedule = np.append(electrolyzer_repair_schedule, [1])
+
+        #     else:
+        #         electrolyzer_repair_schedule = np.append(electrolyzer_repair_schedule, [0])
+        #     counter += 1
+        # electrolyzer_repair_schedule * (stack_replacment_cost * electrolyzer_total_installed_capex)
+        # print("H2 replacement costs: ", electrolyzer_replacement_costs)
+
+        # TMP Thinking area:
+        # def body(i, arr):
+        #     return arr.at[i].set(i)
+
+        # # an array of integer years
+        # result = lax.fori_loop(0, useful_life, body, jnp.zeros(useful_life))
+        # # Output: [0. 1. 2. 3. 4.]
+
+        # # How many hours has the electrolizer run
+        # electro_hours = result * 8760
+
+        # # run hours divided by replacement hours
+        # electro_hours_per_replacement = electro_hours / electrolyzer_repair_schedule
+
+        # # number of replacements
+        # omj.smooth_round(electro_hours_per_replacement)
+        # # [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, ...]
+
+        # electrolyzer_repair_schedule = jnp.zeros(useful_life) # Pre-allocate an array of zeros
+
+        # #                                          init value 
+        # tmp_useful_life = useful_life
+        # result = lax.fori_loop(0, useful_life, body, jnp.zeros(useful_life))
+
+        # from jax import lax
+
+        # def body(i, electrolyzer_repair_schedule):
+        #     electrolyzer_repair_schedule = jnp.where(tmp_useful_life >= time_between_replacement / 8766, 1, 0)
+        #     tmp_useful_life = jnp.where(tmp_useful_life >= time_between_replacement / 8766, tmp_useful_life - time_between_replacement / 8766, tmp_useful_life)
+            
+        #     return electrolyzer_repair_schedule.at[i].set(i)
 
 
 
 
-    # Include Hydrogen PTC from the Inflation Reduction Act (range $0.60 - $3/kg-H2)
-    h2_tax_credit = jnp.ones(10) * (hydrogen_annual_output * PTC_USD_kg)
-    # print('H2 tax credit',h2_tax_credit)
+        # Include Hydrogen PTC from the Inflation Reduction Act (range $0.60 - $3/kg-H2)
+        h2_tax_credit = jnp.ones(10) * (hydrogen_annual_output * PTC_USD_kg)
+        # print('H2 tax credit',h2_tax_credit)
 
-    # Include ITC from IRA (range 0% - 50%)
-    # ITC is expressed as a percentage of the total installed cost which reduces the annual tax
-    # liabiity in year one of the project cash flow.
-    # h2_itc = (ITC_perc / 100) * electrolyzer_total_installed_capex
-    # cf_h2_itc = [0] * 30
-    # cf_h2_itc[1] = h2_itc
+        # Include ITC from IRA (range 0% - 50%)
+        # ITC is expressed as a percentage of the total installed cost which reduces the annual tax
+        # liabiity in year one of the project cash flow.
+        # h2_itc = (ITC_perc / 100) * electrolyzer_total_installed_capex
+        # cf_h2_itc = [0] * 30
+        # cf_h2_itc[1] = h2_itc
 
-    cf_h2_itc = jnp.zeros(30)
-    cf_h2_itc = cf_h2_itc.at[1].set((ITC_perc / 100) * electrolyzer_total_installed_capex)
-    # print('ITC', cf_h2_itc)
+        cf_h2_itc = jnp.zeros(30)
+        cf_h2_itc = cf_h2_itc.at[1].set((ITC_perc / 100) * electrolyzer_total_installed_capex)
+        # print('ITC', cf_h2_itc)
 
-    # Simple cash annuals
-    cf_h2_annuals = -simple_cash_annuals(
-        useful_life,
-        useful_life,
-        electrolyzer_total_capital_cost,
-        electrolyzer_OM_cost,
-        0.03,
-    )
+        # Simple cash annuals
+        cf_h2_annuals = -simple_cash_annuals(
+            useful_life,
+            useful_life,
+            electrolyzer_total_capital_cost,
+            electrolyzer_OM_cost,
+            0.03,
+        )
 
-    # print("CF H2 Annuals",cf_h2_annuals)
+        # print("CF H2 Annuals",cf_h2_annuals)
 
-    # Add positive cashflow from tax credit
-    cf_h2_annuals = jnp.add(cf_h2_annuals, h2_tax_credit)
+        # Add positive cashflow from tax credit
+        cf_h2_annuals = jnp.add(cf_h2_annuals, h2_tax_credit)
 
-    # print('Added H2 ptc with cash flows', cf_h2_annuals)
+        # print('Added H2 ptc with cash flows', cf_h2_annuals)
 
-    # Add ITC
-    cf_h2_annuals = jnp.add(cf_h2_itc, cf_h2_annuals)
-    # print('Added H2 ITC with cash flows', cf_h2_annuals)
+        # Add ITC
+        cf_h2_annuals = jnp.add(cf_h2_itc, cf_h2_annuals)
+        # print('Added H2 ITC with cash flows', cf_h2_annuals)
 
-    return (
-        cf_h2_annuals,
-        electrolyzer_total_capital_cost,
-        electrolyzer_OM_cost,
-        electrolyzer_capex_kw,
-        # time_between_replacement,
-        h2_tax_credit,
-        h2_itc,
-    )
+        return (
+            cf_h2_annuals,
+            electrolyzer_total_capital_cost,
+            electrolyzer_OM_cost,
+            electrolyzer_capex_kw,
+            # time_between_replacement,
+            h2_tax_credit,
+            h2_itc,
+        )
 
 
 if __name__ == "__main__":
