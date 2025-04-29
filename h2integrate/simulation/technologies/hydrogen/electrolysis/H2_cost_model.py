@@ -3,7 +3,7 @@ import openmdao.api as om
 import jax.numpy as jnp
 import openmdao.jax as omj 
 from h2integrate.to_organize.H2_Analysis.simple_cash_annuals import simple_cash_annuals
-
+from h2integrate.to_organize.replacement import replacement_frequency
 
 Debug = True  # Set to true to see print statements in compute_primal
 
@@ -31,6 +31,7 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         self.options.declare('offshore', types=(bool,), default=False)
         self.options.declare('program_record', types=(bool,), defualt=False)
         self.options.declare('capacity_based_OM', types=(bool,), default=True)
+        self.options.declare('amortization_interest', types=(float,), default=0.03)
 
     def setup(self):
         self.options['use_jit'] = not (Debug)
@@ -61,7 +62,7 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         # return value must be hashable.  Note that if we only had one static variable we would
         # still need to return a tuple containing that variable and so would need to follow the
         # variable name with a comma, for example: return (self.staticvar,)
-        return (self.options['include_refurb_in_opex'], self.options['offshore'], self.options['program_record'])
+        return (self.options['include_refurb_in_opex'], self.options['offshore'], self.options['program_record'], self.options['amortization_interest'])
 
     def compute_primal(self, electrolyzer_capex_kw, time_between_replacement, electrolyzer_size_mw, useful_life, atb_year,
         electrical_generation_timeseries_kw, hydrogen_annual_output, PTC_USD_kg, ITC_perc):
@@ -121,8 +122,8 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         elec_installation_factor = 12 / 100  # [%] and electrical BOP
 
         # scale installation fraction if offshore (see Singlitico 2021 https://doi.org/10.1016/j.rset.2021.100005)
-        stack_installation_factor *= 1 + offshore
-        elec_installation_factor *= 1 + offshore
+        stack_installation_factor *= 1 + self.options['offshore']
+        elec_installation_factor *= 1 + self.options['offshore']
 
         # mechanical BOP install cost = 0%
 
@@ -237,10 +238,7 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         # Currently not added into further calculations
 
         # TODO: The original calculations do not have the correct units because useful_life 
-        # is meansured in years and time_between_replacement is measured in hours.
-        # We are going to skip building the repair schedule since it should probably not be part
-        # of the cost calculations. You could probably solve this with a lax.fori_loop(). 
-        
+        # is meansured in years and time_between_replacement is measured in hours.        
         # electrolyzer_repair_schedule = jnp.array[]
         # counter = 1
         # for year in range(0, useful_life):
@@ -256,40 +254,9 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         # electrolyzer_repair_schedule * (stack_replacment_cost * electrolyzer_total_installed_capex)
         # print("H2 replacement costs: ", electrolyzer_replacement_costs)
 
-        # TMP Thinking area:
-        # def body(i, arr):
-        #     return arr.at[i].set(i)
-
-        # # an array of integer years
-        # result = lax.fori_loop(0, useful_life, body, jnp.zeros(useful_life))
-        # # Output: [0. 1. 2. 3. 4.]
-
-        # # How many hours has the electrolizer run
-        # electro_hours = result * 8760
-
-        # # run hours divided by replacement hours
-        # electro_hours_per_replacement = electro_hours / electrolyzer_repair_schedule
-
-        # # number of replacements
-        # omj.smooth_round(electro_hours_per_replacement)
-        # # [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, ...]
-
-        # electrolyzer_repair_schedule = jnp.zeros(useful_life) # Pre-allocate an array of zeros
-
-        # #                                          init value 
-        # tmp_useful_life = useful_life
-        # result = lax.fori_loop(0, useful_life, body, jnp.zeros(useful_life))
-
-        # from jax import lax
-
-        # def body(i, electrolyzer_repair_schedule):
-        #     electrolyzer_repair_schedule = jnp.where(tmp_useful_life >= time_between_replacement / 8766, 1, 0)
-        #     tmp_useful_life = jnp.where(tmp_useful_life >= time_between_replacement / 8766, tmp_useful_life - time_between_replacement / 8766, tmp_useful_life)
-            
-        #     return electrolyzer_repair_schedule.at[i].set(i)
-
-
-
+        # we write a jax function to handle determining the replacement frequencey
+        electrolyzer_repair_schedule = replacement_frequency(plant_useful_life_yr=useful_life, equipment_useful_life_hr=time_between_replacement)
+        electrolyzer_replacement_costs = electrolyzer_repair_schedule * (stack_replacment_cost * electrolyzer_total_installed_capex)
 
         # Include Hydrogen PTC from the Inflation Reduction Act (range $0.60 - $3/kg-H2)
         h2_tax_credit = jnp.ones(10) * (hydrogen_annual_output * PTC_USD_kg)
@@ -301,7 +268,6 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         # h2_itc = (ITC_perc / 100) * electrolyzer_total_installed_capex
         # cf_h2_itc = [0] * 30
         # cf_h2_itc[1] = h2_itc
-
         cf_h2_itc = jnp.zeros(30)
         cf_h2_itc = cf_h2_itc.at[1].set((ITC_perc / 100) * electrolyzer_total_installed_capex)
         # print('ITC', cf_h2_itc)
@@ -309,10 +275,10 @@ class basic_H2_cost_model(om.JaxExplicitComponent):
         # Simple cash annuals
         cf_h2_annuals = -simple_cash_annuals(
             useful_life,
-            useful_life,
+            useful_life, # this input 
             electrolyzer_total_capital_cost,
             electrolyzer_OM_cost,
-            0.03,
+            amortization_interest,
         )
 
         # print("CF H2 Annuals",cf_h2_annuals)
